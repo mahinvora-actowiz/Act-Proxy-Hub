@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"log"
 	"strings"
 	"time"
@@ -18,15 +17,15 @@ func secureFetchHandler(ctx *fasthttp.RequestCtx) {
 
 	start := time.Now()
 
-	scrapedoKey := string(ctx.Request.Header.Peek("scrapedo-key"))
-	scraperAPIKey := string(ctx.Request.Header.Peek("scraper-api-key"))
+	// Single, anonymous key header. The caller never states which proxy
+	// they want — that's resolved entirely from what's stored against
+	// this key in Mongo (set by an admin).
+	providedKey := string(ctx.Request.Header.Peek("api-key"))
 	body := ctx.PostBody()
 	var urlStr string
 	var proxyParamsStr string
 
 	if len(body) > 0 {
-		// We only need a lightweight struct to grab what the router needs.
-		// The specific handlers will parse the full body later.
 		var initialReq struct {
 			URL         string          `json:"url"`
 			ProxyParams json.RawMessage `json:"proxy_params"`
@@ -39,22 +38,11 @@ func secureFetchHandler(ctx *fasthttp.RequestCtx) {
 		}
 	}
 
-	var providedKey, keyType, proxyName string
 	var tokenID = primitive.NilObjectID
-	switch {
-	case scrapedoKey != "" && scraperAPIKey != "":
-		logRequest(ctx, "multiple_keys", tokenID, urlStr, 400, start, 0)
-		sendJSONResponse(ctx, 400, false, "Provide only one API key header: scrapedo-key OR scraper-api-key", nil)
-		return
-	case scrapedoKey != "":
-		providedKey, keyType = scrapedoKey, "scrapedo"
-		proxyName = "scrapedo"
-	case scraperAPIKey != "":
-		providedKey, keyType = scraperAPIKey, "scraperapi"
-		proxyName = "scraperapi"
-	default:
+
+	if providedKey == "" {
 		logRequest(ctx, "key missing", tokenID, urlStr, 401, start, 0)
-		sendJSONResponse(ctx, 401, false, "Missing required header: scrapedo-key or scraper-api-key", nil)
+		sendJSONResponse(ctx, 401, false, "Missing required header: api-key", nil)
 		return
 	}
 
@@ -84,28 +72,6 @@ func secureFetchHandler(ctx *fasthttp.RequestCtx) {
 
 	// Fetch user config from DB
 	var aliasDoc ProxyConfig
-
-	// err := collection.FindOne(c, bson.M{"apiKey": providedKey}).Decode(&aliasDoc)
-
-	// pipeline := mongo.Pipeline{
-	// 	bson.D{{"$match", bson.M{"apiKey": providedKey}}},
-	// 	bson.D{{"$lookup", bson.M{
-	// 		"from":         "tokens",
-	// 		"localField":   "tokenId",
-	// 		"foreignField": "_id",
-	// 		"as":           "tokenInfo",
-	// 	}}},
-	// 	bson.D{{"$unwind", "$tokenInfo"}},
-	// 	bson.D{{"$project", bson.M{
-	// 		"apiKey":                1,
-	// 		"proxyName":             1,
-	// 		"totalEstimatedCredits": 1,
-	// 		"usedCredits":           1,
-	// 		"status":                1,
-	// 		"token":                 "$tokenInfo.token",
-	// 		"tokenId":               1,
-	// 	}}},
-	// }
 
 	pipeline := mongo.Pipeline{
 		bson.D{
@@ -163,38 +129,8 @@ func secureFetchHandler(ctx *fasthttp.RequestCtx) {
 
 	dbProxyName := strings.ToLower(aliasDoc.ProxyName)
 
-	validScrapedoProxies := map[string]bool{
-		"scrapedo": true, "scrape.do": true, "scrape-do": true, "scrapedoproxy": true,
-	}
-	validScraperAPIProxies := map[string]bool{
-		"scraperapi": true, "scraper_api": true, "scraper-api": true, "scraperapiproxy": true, "scraper api": true,
-	}
-
-	var isAuthorized bool
-	switch keyType {
-	case "scrapedo":
-		isAuthorized = validScrapedoProxies[dbProxyName]
-	case "scraperapi":
-		isAuthorized = validScraperAPIProxies[dbProxyName]
-	default:
-		log.Printf("⚠️ Unexpected keyType encountered: %q | key=%s", keyType, providedKey)
-		isAuthorized = false
-	}
-
-	if !isAuthorized {
-		log.Printf("⚠️ Key/Proxy mismatch | header=%s, db.proxyName=%s", keyType, aliasDoc.ProxyName)
-		logRequest(ctx, providedKey, tokenID, urlStr, 403, start, 0)
-		sendJSONResponse(ctx, 403, false,
-			fmt.Sprintf("API key not authorized for proxy type '%s'", aliasDoc.ProxyName),
-			map[string]interface{}{
-				"providedKeyType": keyType,
-				"configuredProxy": aliasDoc.ProxyName,
-			})
-		return
-	}
-
 	if aliasDoc.Token == "" {
-		log.Printf("⚠️ No proxy token configured for scrapedo-key=%s", providedKey)
+		log.Printf("⚠️ No proxy token configured for api-key=%s", providedKey)
 		logRequest(ctx, providedKey, tokenID, urlStr, 500, start, 0)
 		sendJSONResponse(ctx, 500, false, "Proxy not configured. Contact support.", nil)
 		return
@@ -228,25 +164,29 @@ func secureFetchHandler(ctx *fasthttp.RequestCtx) {
 	default:
 	}
 
-	// DISPATCH BASED ON proxyName
-	// proxyName := strings.ToLower(string(ctx.QueryArgs().Peek("proxyName")))
-	// proxiesStr := string(ctx.QueryArgs().Peek("proxy_params"))
-
-	cfg, err := parseProxyConfig(proxyName, proxyParamsStr)
+	// The caller never knows which proxy is behind their key, so whatever
+	// proxy_params they sent is always in Scrape.do's shape. Parse it as
+	// that canonical format first...
+	parsedCfg, err := parseProxyConfig("scrapedo", proxyParamsStr)
 	if err != nil {
 		log.Printf("❌ Config parse error: %v", err)
 		logRequest(ctx, providedKey, tokenID, urlStr, 400, start, 0)
 		sendJSONResponse(ctx, 400, false, err.Error(), nil)
 		return
 	}
+	sdCfg, _ := parsedCfg.(*ScrapeDoConfig)
+	if sdCfg == nil {
+		sdCfg = &ScrapeDoConfig{}
+	}
 
+	// ...then dispatch to whichever proxy is actually configured for this
+	// key, translating params only when the resolved proxy isn't Scrape.do.
 	switch dbProxyName {
 	case "scrapedo", "scrape.do", "scrape-do", "scrapedoproxy":
-		doCfg, _ := cfg.(*ScrapeDoConfig)
-		fetchHandlerScrapeDo(ctx, providedKey, aliasDoc.TokenID, aliasDoc.Token, aliasDoc.TotalEstimatedCredits, doCfg, start)
+		fetchHandlerScrapeDo(ctx, providedKey, aliasDoc.TokenID, aliasDoc.Token, aliasDoc.TotalEstimatedCredits, sdCfg, start)
 
 	case "scraperapi", "scraper_api", "scraper-api", "scraperapiproxy", "scraper api":
-		apiCfg, _ := cfg.(*ScraperAPIConfig)
+		apiCfg := convertScrapeDoToScraperAPI(sdCfg)
 		fetchHandlerScraperAPI(ctx, providedKey, aliasDoc.TokenID, aliasDoc.Token, aliasDoc.TotalEstimatedCredits, apiCfg, start)
 
 	default:

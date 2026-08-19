@@ -283,3 +283,76 @@ func getIntPtr(m map[string]interface{}, key string) *int {
 	}
 	return nil
 }
+
+// convertScrapeDoToScraperAPI translates a canonical Scrape.do-shaped config
+// (the only format callers ever send, since they don't know which proxy is
+// actually behind their key) into the closest equivalent ScraperAPIConfig.
+// Not every Scrape.do option has a ScraperAPI equivalent — those are dropped
+// silently since ScraperAPI has no matching feature.
+func convertScrapeDoToScraperAPI(src *ScrapeDoConfig) *ScraperAPIConfig {
+	if src == nil {
+		return &ScraperAPIConfig{}
+	}
+
+	dst := &ScraperAPIConfig{}
+
+	// Booleans
+	if src.Render != nil {
+		dst.Render = src.Render
+	}
+	if src.ScreenShot != nil {
+		dst.Screenshot = src.ScreenShot
+	} else if src.FullScreenShot != nil {
+		dst.Screenshot = src.FullScreenShot
+	}
+	if src.Super != nil && *src.Super {
+		premium := true
+		dst.Premium = &premium
+	}
+	if src.ReturnJSON != nil {
+		dst.AutoParse = src.ReturnJSON
+	}
+	if src.ForwardHeaders != nil {
+		dst.KeepHeaders = src.ForwardHeaders
+	} else if src.CustomHeaders != nil {
+		dst.KeepHeaders = src.CustomHeaders
+	}
+	if src.DisableRedirection != nil {
+		follow := !*src.DisableRedirection
+		dst.FollowRedirect = &follow
+	}
+
+	// Strings
+	if src.GeoCode != "" {
+		dst.CountryCode = src.GeoCode
+	} else if src.RegionalGeoCode != "" {
+		dst.CountryCode = src.RegionalGeoCode
+	}
+	if src.WaitSelector != "" {
+		dst.WaitForSelector = src.WaitSelector
+		// ScraperAPI requires render=true for wait_for_selector to work
+		if dst.Render == nil || !*dst.Render {
+			render := true
+			dst.Render = &render
+		}
+	}
+	if src.Device != "" {
+		dst.DeviceType = src.Device
+	}
+	if src.Output != "" {
+		dst.OutputFormat = src.Output
+	}
+
+	// Numbers
+	if src.SessionId != nil {
+		dst.SessionNumber = src.SessionId
+	}
+	if src.Timeout > 0 {
+		dst.Timeout = src.Timeout
+	}
+	if src.CustomWait > 0 {
+		dst.CustomWait = src.CustomWait
+	}
+
+	return dst
+}
