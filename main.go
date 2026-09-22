@@ -13,6 +13,8 @@ import (
 var usageCounter = make(map[string]int)
 var usageLock sync.Mutex
 
+var ActOneEndpoint string
+
 func main() {
 
 	// Load .env file
@@ -20,6 +22,8 @@ func main() {
 	if err != nil {
 		log.Println("Warning: .env file not found, using system environment variables")
 	}
+
+	ActOneEndpoint = os.Getenv("ACTONE_PROXY_URL")
 
 	// Read environment variables
 	port := os.Getenv("PORT")

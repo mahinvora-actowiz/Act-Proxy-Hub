@@ -31,6 +31,7 @@ type RequestLog struct {
 	ResponseTime int64              `bson:"responseTime"`
 	CreditUsed   int                `bson:"creditUsed"`
 	CreatedAt    time.Time          `bson:"createdAt"`
+	ErrorMessage string              `bson:"errorMessage"` 
 }
 
 // Scrape.do configuration struct

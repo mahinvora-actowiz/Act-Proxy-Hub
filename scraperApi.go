@@ -15,7 +15,17 @@ import (
 
 func fetchHandlerScraperAPI(ctx *fasthttp.RequestCtx, scraperapiKey string, tokenID primitive.ObjectID, proxyToken string, totalEstimatedCredits int, cfg *ScraperAPIConfig, start time.Time) {
 	body := ctx.PostBody()
+
+	// Extract URL early for logging context, even if JSON is invalid
+	var earlyURL string
+	if len(body) > 0 {
+		var tempReq struct { URL string `json:"url"` }
+		_ = json.Unmarshal(body, &tempReq)
+		earlyURL = tempReq.URL
+	}
+
 	if len(body) == 0 {
+		logRequest(ctx, scraperapiKey, tokenID, "", 400, start, 0, "Request body is empty") 
 		sendJSONResponse(ctx, 400, false, "Request body is empty", nil)
 		return
 	}
@@ -34,9 +44,10 @@ func fetchHandlerScraperAPI(ctx *fasthttp.RequestCtx, scraperapiKey string, toke
 
 	var req FetchRequest
 	decoder := json.NewDecoder(bytes.NewReader(body))
-	decoder.UseNumber() // Tells Go to keep numbers as raw text, preventing precision loss
+	decoder.UseNumber()
 	if err := decoder.Decode(&req); err != nil {
 		log.Printf("❌ JSON Unmarshal Error: %v | Body: %s", err, string(body))
+		logRequest(ctx, scraperapiKey, tokenID, earlyURL, 400, start, 0, fmt.Sprintf("Invalid JSON format: %v", err)) 
 		sendJSONResponse(ctx, 400, false, fmt.Sprintf("Invalid JSON format: %v", err), nil)
 		return
 	}
@@ -133,11 +144,13 @@ func fetchHandlerScraperAPI(ctx *fasthttp.RequestCtx, scraperapiKey string, toke
 	urlStr := req.URL
 	parsedURL, err := url.Parse(urlStr)
 	if err != nil {
+		logRequest(ctx, scraperapiKey, tokenID, urlStr, 400, start, 0, fmt.Sprintf("Invalid URL format: %v", err)) 
 		sendJSONResponse(ctx, 400, false, "Invalid URL format", nil)
 		return
 	}
 
 	if parsedURL.Scheme == "" || parsedURL.Host == "" {
+		logRequest(ctx, scraperapiKey, tokenID, urlStr, 400, start, 0, "Invalid target URL: missing scheme or host")
 		sendJSONResponse(ctx, 400, false, "Invalid target URL: missing scheme or host", nil)
 		return
 	}
@@ -194,7 +207,7 @@ func fetchHandlerScraperAPI(ctx *fasthttp.RequestCtx, scraperapiKey string, toke
 		setInt(apiParams, "timeout", cfg.Timeout)
 
 		apiEndpoint := fmt.Sprintf("http://api.scraperapi.com/?%s", apiParams.Encode())
-		executeRequest(ctx, scraperapiKey, tokenID, "", apiEndpoint, method, payloadStr, customHeaders, totalEstimatedCredits, start, "scraperapi")
+		executeRequest(ctx, scraperapiKey, tokenID, "", apiEndpoint, req.URL, method, payloadStr, customHeaders, totalEstimatedCredits, start, "scraperapi")
 		return
 	}
 
@@ -202,5 +215,5 @@ func fetchHandlerScraperAPI(ctx *fasthttp.RequestCtx, scraperapiKey string, toke
 	optionsStr := buildScraperAPIProxyOptions(cfg)
 	proxyAddr := fmt.Sprintf("http://%s:%s@proxy-server.scraperapi.com:8001", optionsStr, cfg.Token)
 
-	executeRequest(ctx, scraperapiKey, tokenID, proxyAddr, targetURL, method, payloadStr, customHeaders, totalEstimatedCredits, start, "scraperapi")
+	executeRequest(ctx, scraperapiKey, tokenID, proxyAddr, targetURL, req.URL, method, payloadStr, customHeaders, totalEstimatedCredits, start, "scraperapi")
 }

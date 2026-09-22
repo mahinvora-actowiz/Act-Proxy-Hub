@@ -102,16 +102,17 @@ func doRequestWithRetry(client *fasthttp.Client, req *fasthttp.Request, resp *fa
 }
 
 func executeRequest(ctx *fasthttp.RequestCtx, apiKey string, tokenID primitive.ObjectID, proxyAddr string,
-	targetURL string, method string, payload string, customHeaders string,
+	targetURL string, originalTargetURL string, method string, payload interface{}, customHeaders string, // ✅ CHANGED: payload is now interface{}
 	totalEstimatedCredits int, start time.Time, provider string) {
 
 	// Variables to capture final state for logging
 	var finalStatusCode int
 	var finalActualCost int
+	var finalErrorMessage string 
 
 	// Defer ensures we log the request exactly once, regardless of how the function exits
 	defer func() {
-		logRequest(ctx, apiKey, tokenID, targetURL, finalStatusCode, start, finalActualCost)
+		logRequest(ctx, apiKey, tokenID, originalTargetURL, finalStatusCode, start, finalActualCost, finalErrorMessage)
 	}()
 
 	var client *fasthttp.Client
@@ -150,11 +151,35 @@ func executeRequest(ctx *fasthttp.RequestCtx, apiKey string, tokenID primitive.O
 		req.Header.SetMethod("GET")
 	case "POST":
 		req.Header.SetMethod("POST")
-		req.SetBody([]byte(payload))
 
-		if req.Header.Peek("Content-Type") == nil {
+		// ✅ NEW: Handle both string and object payloads safely
+		var finalPayload []byte
+		switch p := payload.(type) {
+		case string:
+			finalPayload = []byte(p)
+			// Only auto-set Content-Type if it looks like JSON
+			if req.Header.Peek("Content-Type") == nil && len(p) > 0 && (p[0] == '{' || p[0] == '[') {
+				req.Header.Set("Content-Type", "application/json")
+			}
+		case nil:
+			finalPayload = []byte("{}")
+			req.Header.Set("Content-Type", "application/json")
+		default:
+			// It's an object/map (like ActOne's actOneReq), marshal it to JSON
+			var err error
+			finalPayload, err = json.Marshal(p)
+			if err != nil {
+				log.Printf("❌ Payload Marshal Error: %v", err)
+				finalErrorMessage = fmt.Sprintf("Failed to marshal request payload: %v", err)
+				finalStatusCode = 500
+				sendJSONResponse(ctx, 500, false, "Internal server error", nil)
+				return
+			}
 			req.Header.Set("Content-Type", "application/json")
 		}
+
+		req.SetBody(finalPayload)
+
 	default:
 		finalStatusCode = 400
 		sendJSONResponse(ctx, 400, false, "Invalid HTTP method", nil)
@@ -186,31 +211,54 @@ func executeRequest(ctx *fasthttp.RequestCtx, apiKey string, tokenID primitive.O
 	}
 
 	err := doRequestWithRetry(client, req, resp)
+	
+	if err != nil {
+		finalErrorMessage = err.Error()
+	}
 
+	// 1. Calculate base cost for providers that report it in headers
 	actualCost := 0
 	switch provider {
 	case "scrapedo":
-		if costHeader := string(resp.Header.Peek("scrape.do-request-cost")); costHeader != "" {
-			if c, err := strconv.Atoi(costHeader); err == nil {
-				actualCost = c
+		if resp != nil {
+			if costHeader := string(resp.Header.Peek("scrape.do-request-cost")); costHeader != "" {
+				if c, err := strconv.Atoi(costHeader); err == nil {
+					actualCost = c
+				}
 			}
 		}
 	case "scraperapi":
-		if costHeader := string(resp.Header.Peek("sa-credit-cost")); costHeader != "" {
-			if c, err := strconv.Atoi(costHeader); err == nil {
-				actualCost = c
+		if resp != nil {
+			if costHeader := string(resp.Header.Peek("sa-credit-cost")); costHeader != "" {
+				if c, err := strconv.Atoi(costHeader); err == nil {
+					actualCost = c
+				}
 			}
 		}
 	}
+
+	// 2. Determine success safely (checks resp != nil first to prevent panic)
+	success := err == nil && resp != nil && resp.StatusCode() == 200
+
+	// 3. ActOne: Charge 1 credit ONLY on success, 0 on failure
+	if provider == "actone" && success {
+		actualCost = 1
+	}
+	
 	finalActualCost = actualCost
 
-	success := err == nil && resp != nil && resp.StatusCode() == 200
+	// 4. Safely extract status code to prevent panic if resp is nil (e.g., network drop)
+	statusCode := 0
+	if resp != nil {
+		statusCode = resp.StatusCode()
+	}
+	
 	isNetworkError := err != nil
-	isProxyFailure := resp != nil && (resp.StatusCode() == 502 || resp.StatusCode() == 503 || resp.StatusCode() == 504)
+	isProxyFailure := resp != nil && (statusCode == 502 || statusCode == 503 || statusCode == 504)
 
 	if isNetworkError || isProxyFailure {
 		log.Printf("❌ Request failed | provider=%s | url=%s | err=%v | status=%d",
-			provider, targetURL, err, resp.StatusCode())
+			provider, targetURL, err, statusCode) // ✅ SAFE: uses statusCode variable
 
 		updateInc := bson.M{"usedCredits": actualCost, "total": 1, "fail": 1}
 		collection.UpdateOne(context.Background(),
@@ -218,15 +266,17 @@ func executeRequest(ctx *fasthttp.RequestCtx, apiKey string, tokenID primitive.O
 			bson.M{"$inc": updateInc})
 
 		if isNetworkError {
+			finalErrorMessage = err.Error() 
 			log.Printf("🚨 NETWORK ERROR (fasthttp failed to connect/dropped): %v | URL: %s", err, targetURL)
-		} else if resp.StatusCode() == 502 {
-			// Proxies often put the real error in the response body!
+		} else if statusCode == 502 {
+			finalErrorMessage = fmt.Sprintf("Proxy 502: %s", string(resp.Body()))
 			log.Printf("🚨 PROXY RETURNED 502 HTTP STATUS. Body: %s | URL: %s", string(resp.Body()), targetURL)
+		} else {
+			// ✅ Fallback for 503/504 or other proxy failures
+			if finalErrorMessage == "" {
+				finalErrorMessage = fmt.Sprintf("Proxy failure: HTTP %d", statusCode)
+			}
 		}
-		// -----------------------------------
-
-		log.Printf("❌ Request failed | provider=%s | url=%s | err=%v | status=%d",
-			provider, targetURL, err, resp.StatusCode())
 
 		if err != nil {
 			if errors.Is(err, fasthttp.ErrTimeout) {
@@ -238,21 +288,34 @@ func executeRequest(ctx *fasthttp.RequestCtx, apiKey string, tokenID primitive.O
 			}
 			return
 		}
-		finalStatusCode = resp.StatusCode()
-		sendJSONResponse(ctx, resp.StatusCode(), false, "Proxy error", map[string]interface{}{
-			"upstreamStatus": resp.StatusCode(),
+		
+		finalStatusCode = statusCode
+		sendJSONResponse(ctx, statusCode, false, "Proxy error", map[string]interface{}{
+			"upstreamStatus": statusCode,
 			"body":           resp.Body(),
 		})
 		return
 	}
 
+	// 5. Handle non-proxy failures (e.g., 404, 401, 403, 400)
 	updateInc := bson.M{"usedCredits": actualCost, "total": 1}
 	if success {
 		updateInc["success"] = 1
-	} else if resp.StatusCode() == 429 {
+	} else if statusCode == 429 {
 		updateInc["quotaExceeded"] = 1
+		if finalErrorMessage == "" {
+			finalErrorMessage = "Upstream quota exceeded (429)"
+		}
 	} else {
 		updateInc["fail"] = 1
+		if finalErrorMessage == "" {
+			// Capture a snippet of the upstream error body to log in MongoDB
+			bodySnippet := string(resp.Body())
+			if len(bodySnippet) > 150 {
+				bodySnippet = bodySnippet[:150] + "..." // Truncate to keep DB logs clean
+			}
+			finalErrorMessage = fmt.Sprintf("Upstream error %d: %s", statusCode, strings.TrimSpace(bodySnippet))
+		}
 	}
 
 	res, err := collection.UpdateOne(
@@ -288,13 +351,13 @@ func executeRequest(ctx *fasthttp.RequestCtx, apiKey string, tokenID primitive.O
 	}
 
 	log.Printf("✅ Success | provider=%s | status=%d | time=%v | cost=%d",
-		provider, resp.StatusCode(), time.Since(start), actualCost)
+		provider, statusCode, time.Since(start), actualCost)
 
-	finalStatusCode = resp.StatusCode()
+	finalStatusCode = statusCode
 
 	resp.Header.VisitAll(func(k, v []byte) {
 		ctx.Response.Header.SetBytesKV(k, v)
 	})
-	ctx.SetStatusCode(resp.StatusCode())
+	ctx.SetStatusCode(statusCode)
 	ctx.SetBody(resp.Body())
 }

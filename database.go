@@ -48,7 +48,6 @@ func addDomainToAlias(collection *mongo.Collection, apiKey, domain string) error
 			},
 		},
 	)
-
 	return err
 }
 
@@ -56,15 +55,16 @@ func logRequest(
 	ctx *fasthttp.RequestCtx,
 	apiKey string,
 	tokenID primitive.ObjectID,
-	targetURL string,
+	originalTargetURL string,
 	statusCode int,
 	start time.Time,
 	actualCost int,
+	errorMessage string,
 ) {
 	domain := "N/A"
 
-	if targetURL != "" {
-		if parsedURL, err := url.Parse(targetURL); err == nil && parsedURL.Hostname() != "" {
+	if originalTargetURL != "" {
+		if parsedURL, err := url.Parse(originalTargetURL); err == nil && parsedURL.Hostname() != "" {
 			domain = parsedURL.Hostname()
 		}
 	}
@@ -82,6 +82,7 @@ func logRequest(
 		ResponseTime: time.Since(start).Milliseconds(),
 		CreditUsed:   actualCost,
 		CreatedAt:    time.Now(),
+		ErrorMessage: errorMessage, 
 	}
 
 	go func() {
