@@ -28,9 +28,9 @@ func getProxyClient(proxyAddr string) *fasthttp.Client {
 	}
 
 	var client = &fasthttp.Client{
-		Dial: fasthttpproxy.FasthttpHTTPDialer(proxyAddr),
+		Dial: fasthttpproxy.FasthttpHTTPDialerTimeout(proxyAddr, 10*time.Second),
 
-		MaxConnsPerHost:     300,
+		MaxConnsPerHost:     500,
 		MaxIdleConnDuration: 15 * time.Second,
 		MaxConnDuration:     2 * time.Minute,
 		MaxConnWaitTimeout:  10 * time.Second,
@@ -102,17 +102,18 @@ func doRequestWithRetry(client *fasthttp.Client, req *fasthttp.Request, resp *fa
 }
 
 func executeRequest(ctx *fasthttp.RequestCtx, apiKey string, tokenID primitive.ObjectID, proxyAddr string,
-	targetURL string, originalTargetURL string, method string, payload interface{}, customHeaders string, // ✅ CHANGED: payload is now interface{}
+	targetURL string, originalTargetURL string, method string, payload interface{}, customHeaders string,
 	totalEstimatedCredits int, start time.Time, provider string) {
 
 	// Variables to capture final state for logging
 	var finalStatusCode int
 	var finalActualCost int
-	var finalErrorMessage string 
+	var finalErrorMessage string
+	var errorSource string = "none"
 
 	// Defer ensures we log the request exactly once, regardless of how the function exits
 	defer func() {
-		logRequest(ctx, apiKey, tokenID, originalTargetURL, finalStatusCode, start, finalActualCost, finalErrorMessage)
+		logRequest(ctx, apiKey, tokenID, originalTargetURL, finalStatusCode, start, finalActualCost, finalErrorMessage, errorSource)
 	}()
 
 	var client *fasthttp.Client
@@ -130,6 +131,8 @@ func executeRequest(ctx *fasthttp.RequestCtx, apiKey string, tokenID primitive.O
 
 	req.SetRequestURI(targetURL)
 	req.URI().DisablePathNormalizing = true
+
+	req.SetTimeout(60 * time.Second)
 
 	if proxyAddr != "" && strings.HasPrefix(strings.ToLower(targetURL), "http://") {
 		proxyURL, err := url.Parse(proxyAddr)
@@ -151,13 +154,10 @@ func executeRequest(ctx *fasthttp.RequestCtx, apiKey string, tokenID primitive.O
 		req.Header.SetMethod("GET")
 	case "POST":
 		req.Header.SetMethod("POST")
-
-		// ✅ NEW: Handle both string and object payloads safely
 		var finalPayload []byte
 		switch p := payload.(type) {
 		case string:
 			finalPayload = []byte(p)
-			// Only auto-set Content-Type if it looks like JSON
 			if req.Header.Peek("Content-Type") == nil && len(p) > 0 && (p[0] == '{' || p[0] == '[') {
 				req.Header.Set("Content-Type", "application/json")
 			}
@@ -165,24 +165,23 @@ func executeRequest(ctx *fasthttp.RequestCtx, apiKey string, tokenID primitive.O
 			finalPayload = []byte("{}")
 			req.Header.Set("Content-Type", "application/json")
 		default:
-			// It's an object/map (like ActOne's actOneReq), marshal it to JSON
 			var err error
 			finalPayload, err = json.Marshal(p)
 			if err != nil {
 				log.Printf("❌ Payload Marshal Error: %v", err)
 				finalErrorMessage = fmt.Sprintf("Failed to marshal request payload: %v", err)
 				finalStatusCode = 500
-				sendJSONResponse(ctx, 500, false, "Internal server error", nil)
+				errorSource = "proxy_hub" // Gateway failed to process payload
+				sendJSONResponse(ctx, 500, false, "Internal server error", nil, "proxy_hub")
 				return
 			}
 			req.Header.Set("Content-Type", "application/json")
 		}
-
 		req.SetBody(finalPayload)
-
 	default:
 		finalStatusCode = 400
-		sendJSONResponse(ctx, 400, false, "Invalid HTTP method", nil)
+		errorSource = "proxy_hub" // Gateway rejected invalid method
+		sendJSONResponse(ctx, 400, false, "Invalid HTTP method", nil, "proxy_hub")
 		return
 	}
 
@@ -211,7 +210,7 @@ func executeRequest(ctx *fasthttp.RequestCtx, apiKey string, tokenID primitive.O
 	}
 
 	err := doRequestWithRetry(client, req, resp)
-	
+
 	if err != nil {
 		finalErrorMessage = err.Error()
 	}
@@ -240,11 +239,11 @@ func executeRequest(ctx *fasthttp.RequestCtx, apiKey string, tokenID primitive.O
 	// 2. Determine success safely (checks resp != nil first to prevent panic)
 	success := err == nil && resp != nil && resp.StatusCode() == 200
 
-	// 3. ActOne: Charge 1 credit ONLY on success, 0 on failure
+	// 3. AtOne: Charge 1 credit ONLY on success, 0 on failure
 	if provider == "actone" && success {
 		actualCost = 1
 	}
-	
+
 	finalActualCost = actualCost
 
 	// 4. Safely extract status code to prevent panic if resp is nil (e.g., network drop)
@@ -252,28 +251,50 @@ func executeRequest(ctx *fasthttp.RequestCtx, apiKey string, tokenID primitive.O
 	if resp != nil {
 		statusCode = resp.StatusCode()
 	}
-	
+
 	isNetworkError := err != nil
 	isProxyFailure := resp != nil && (statusCode == 502 || statusCode == 503 || statusCode == 504)
 
 	if isNetworkError || isProxyFailure {
+		errorSource = "proxy_gateway"
+
 		log.Printf("❌ Request failed | provider=%s | url=%s | err=%v | status=%d",
-			provider, targetURL, err, statusCode) // ✅ SAFE: uses statusCode variable
+			provider, targetURL, err, statusCode)
 
 		updateInc := bson.M{"usedCredits": actualCost, "total": 1, "fail": 1}
+		updateQuery := bson.M{"$inc": updateInc}
+
+		if actualCost > 0 {
+			updateQuery["$addToSet"] = bson.M{"distinctCredits": actualCost}
+		}
+
 		collection.UpdateOne(context.Background(),
 			bson.M{"apiKey": apiKey},
-			bson.M{"$inc": updateInc})
-
+			updateQuery)
+		
 		if isNetworkError {
-			finalErrorMessage = err.Error() 
+			// Capture exact upstream body if available, even on network errors
+			if resp != nil && len(resp.Body()) > 0 {
+				finalErrorMessage = fmt.Sprintf("Network error: %v | Upstream: %s", err, strings.TrimSpace(string(resp.Body())))
+			} else {
+				finalErrorMessage = err.Error()
+			}
 			log.Printf("🚨 NETWORK ERROR (fasthttp failed to connect/dropped): %v | URL: %s", err, targetURL)
 		} else if statusCode == 502 {
-			finalErrorMessage = fmt.Sprintf("Proxy 502: %s", string(resp.Body()))
-			log.Printf("🚨 PROXY RETURNED 502 HTTP STATUS. Body: %s | URL: %s", string(resp.Body()), targetURL)
+			// Ensure upstream body is captured for 502
+			upstreamBody := strings.TrimSpace(string(resp.Body()))
+			if upstreamBody != "" {
+				finalErrorMessage = fmt.Sprintf("Proxy 502: %s", upstreamBody)
+			} else {
+				finalErrorMessage = "Proxy 502: Bad Gateway"
+			}
+			log.Printf("🚨 PROXY RETURNED 502 HTTP STATUS. Body: %s | URL: %s", upstreamBody, targetURL)
 		} else {
-			// ✅ Fallback for 503/504 or other proxy failures
-			if finalErrorMessage == "" {
+			// Fallback for 503/504 or other proxy failures NOW includes exact upstream body
+			upstreamBody := strings.TrimSpace(string(resp.Body()))
+			if upstreamBody != "" {
+				finalErrorMessage = fmt.Sprintf("Proxy failure: HTTP %d | Upstream: %s", statusCode, upstreamBody)
+			} else if finalErrorMessage == "" {
 				finalErrorMessage = fmt.Sprintf("Proxy failure: HTTP %d", statusCode)
 			}
 		}
@@ -281,19 +302,19 @@ func executeRequest(ctx *fasthttp.RequestCtx, apiKey string, tokenID primitive.O
 		if err != nil {
 			if errors.Is(err, fasthttp.ErrTimeout) {
 				finalStatusCode = 504
-				sendJSONResponse(ctx, 504, false, "Upstream timeout", nil)
+				sendJSONResponse(ctx, 504, false, "Upstream timeout", nil, "proxy_gateway")
 			} else {
 				finalStatusCode = 502
-				sendJSONResponse(ctx, 502, false, "Bad gateway", nil)
+				sendJSONResponse(ctx, 502, false, "Bad gateway", nil, "proxy_gateway")
 			}
 			return
 		}
-		
+
 		finalStatusCode = statusCode
 		sendJSONResponse(ctx, statusCode, false, "Proxy error", map[string]interface{}{
 			"upstreamStatus": statusCode,
 			"body":           resp.Body(),
-		})
+		}, "proxy_gateway")
 		return
 	}
 
@@ -303,50 +324,111 @@ func executeRequest(ctx *fasthttp.RequestCtx, apiKey string, tokenID primitive.O
 		updateInc["success"] = 1
 	} else if statusCode == 429 {
 		updateInc["quotaExceeded"] = 1
-		if finalErrorMessage == "" {
+		upstreamBody := ""
+		if resp != nil {
+			upstreamBody = strings.TrimSpace(string(resp.Body()))
+		}
+		if upstreamBody != "" {
+			finalErrorMessage = fmt.Sprintf("Upstream quota exceeded (429): %s", upstreamBody)
+		} else if finalErrorMessage == "" {
 			finalErrorMessage = "Upstream quota exceeded (429)"
 		}
 	} else {
 		updateInc["fail"] = 1
-		if finalErrorMessage == "" {
-			// Capture a snippet of the upstream error body to log in MongoDB
-			bodySnippet := string(resp.Body())
-			if len(bodySnippet) > 150 {
-				bodySnippet = bodySnippet[:150] + "..." // Truncate to keep DB logs clean
-			}
-			finalErrorMessage = fmt.Sprintf("Upstream error %d: %s", statusCode, strings.TrimSpace(bodySnippet))
+		errorSource = "proxy_gateway"
+		// Always capture exact upstream error body for 4xx/5xx to prevent blank messages
+		upstreamBody := ""
+		if resp != nil {
+			upstreamBody = strings.TrimSpace(string(resp.Body()))
 		}
+		if upstreamBody != "" {
+			finalErrorMessage = fmt.Sprintf("Upstream error %d: %s", statusCode, upstreamBody)
+		} else if finalErrorMessage == "" {
+			finalErrorMessage = fmt.Sprintf("Upstream error %d (empty body)", statusCode)
+		}
+	}
+
+	filter := bson.M{
+		"apiKey": apiKey,
+		"total":  bson.M{"$lt": totalEstimatedCredits}, 
+	}
+
+	updateQuery := bson.M{
+		"$inc": updateInc, 
+		"$set": bson.M{"updatedAt": time.Now()},
+	}
+
+	if actualCost > 0 {
+		updateQuery["$addToSet"] = bson.M{"distinctCredits": actualCost}
 	}
 
 	res, err := collection.UpdateOne(
 		context.Background(),
-		bson.M{
-			"apiKey": apiKey,
-			"$expr": bson.M{
-				"$lte": []interface{}{
-					bson.M{"$add": []interface{}{"$usedCredits", actualCost}},
-					totalEstimatedCredits,
-				},
-			},
-		},
-		bson.M{
-			"$inc": updateInc,
-			"$set": bson.M{"updatedAt": time.Now()},
-		},
+		filter,
+		updateQuery,
 	)
 
 	if err != nil {
-		log.Println("⚠️ Mongo stats update failed:", err)
+		log.Println("️ Mongo stats update failed:", err)
+		// Depending on your needs, you might want to return 500 here if the DB is down
 	}
 
 	if res != nil && res.ModifiedCount == 0 {
-		log.Printf("🚫 Quota exceeded AFTER request | key=%s | provider=%s | cost=%d", apiKey, provider, actualCost)
+		log.Printf("🚫 Quota exceeded | key=%s | provider=%s | cost=%d", apiKey, provider, actualCost)
+		
+		// Optional: Record the overage attempt in the DB
 		collection.UpdateOne(context.Background(),
 			bson.M{"apiKey": apiKey},
-			bson.M{"$inc": bson.M{"usedCredits": actualCost, "quotaExceeded": 1, "total": 1}})
+			bson.M{"$inc": bson.M{"quotaExceeded": 1}}) // Removed 'total: 1' and 'usedCredits' here to avoid double counting if not desired
 
 		finalStatusCode = 429
-		sendJSONResponse(ctx, 429, false, "Quota exceeded", nil)
+		finalErrorMessage = "Quota exceeded"
+		errorSource = "proxy_hub"
+		
+		sendJSONResponse(ctx, 429, false, "Quota exceeded", nil, "proxy_hub")
+		return
+	}
+
+	if statusCode >= 400 {
+		finalStatusCode = statusCode
+		
+		// Always label upstream errors as proxy_gateway
+		errorSource = "proxy_gateway" 
+		
+		upstreamBody := ""
+		if resp != nil {
+			upstreamBody = strings.TrimSpace(string(resp.Body()))
+		}
+
+		var enrichedData interface{}
+		if upstreamBody != "" {
+			var upstreamJSON map[string]interface{}
+			
+			// 1. Try to parse the upstream response as JSON
+			if err := json.Unmarshal([]byte(upstreamBody), &upstreamJSON); err == nil {
+				// 2. If successful, safely inject our error_source field
+				// upstreamJSON["error_source"] = errorSource
+				enrichedData = upstreamJSON
+			} else {
+				// 3. If it's not valid JSON (e.g., raw HTML block page), pass it as a string
+				enrichedData = map[string]interface{}{
+					"upstream_body": upstreamBody,
+				}
+			}
+		} else {
+			enrichedData = map[string]interface{}{
+				"upstream_body": "",
+			}
+		}
+
+		// 🚀 NEW: Log the EXACT upstream response in the errorMessage for MongoDB
+		if upstreamBody != "" {
+			finalErrorMessage = fmt.Sprintf("Upstream error %d | Exact Response: %s", statusCode, upstreamBody)
+		} else {
+			finalErrorMessage = fmt.Sprintf("Upstream error %d (empty body)", statusCode)
+		}
+
+		sendJSONResponse(ctx, statusCode, false, finalErrorMessage, enrichedData, errorSource)
 		return
 	}
 
@@ -354,10 +436,31 @@ func executeRequest(ctx *fasthttp.RequestCtx, apiKey string, tokenID primitive.O
 		provider, statusCode, time.Since(start), actualCost)
 
 	finalStatusCode = statusCode
+	errorSource = "proxy_gateway" // Indicate response successfully came through proxy gateway
 
-	resp.Header.VisitAll(func(k, v []byte) {
+	upstreamBody := string(resp.Body())
+
+	// Construct the exact response structure you requested
+	successResponse := map[string]interface{}{
+		"status":       "success",
+		"status_code":  statusCode,
+		"url":          originalTargetURL,
+		"error_source": errorSource,
+		"content":      upstreamBody,
+	}
+
+	jsonData, err := json.Marshal(successResponse)
+	if err != nil {
+		log.Printf("❌ Failed to marshal success response: %v", err)
+		ctx.SetStatusCode(500)
+		ctx.SetBodyString(`{"status":"error","message":"Internal server error"}`)
+		return
+	}
+
+	// Send the unified success response
+		resp.Header.VisitAll(func(k, v []byte) {
 		ctx.Response.Header.SetBytesKV(k, v)
 	})
 	ctx.SetStatusCode(statusCode)
-	ctx.SetBody(resp.Body())
+	ctx.SetBody(jsonData)
 }

@@ -13,7 +13,7 @@ import (
 	"go.mongodb.org/mongo-driver/mongo"
 )
 
-const systemTimeOffset = 11*time.Hour + 30*time.Minute
+const systemTimeOffset = 0*time.Hour + 0*time.Minute
 
 func getActualTime() time.Time {
 	return time.Now().Add(systemTimeOffset)
@@ -60,6 +60,7 @@ func logRequest(
 	start time.Time,
 	actualCost int,
 	errorMessage string,
+	errorSource string,
 ) {
 	domain := "N/A"
 
@@ -73,6 +74,9 @@ func logRequest(
 		apiKey = "unknown"
 	}
 
+	// Use getActualTime() for consistency with your systemTimeOffset logic
+	currentTime := time.Now()
+
 	logDoc := RequestLog{
 		Key:          apiKey,
 		TokenID:      tokenID,
@@ -81,8 +85,9 @@ func logRequest(
 		StatusCode:   statusCode,
 		ResponseTime: time.Since(start).Milliseconds(),
 		CreditUsed:   actualCost,
-		CreatedAt:    time.Now(),
-		ErrorMessage: errorMessage, 
+		CreatedAt:    currentTime, 
+		ErrorMessage: errorMessage,
+		ErrorSource:  errorSource,
 	}
 
 	go func() {
@@ -90,7 +95,7 @@ func logRequest(
 
 		insertCtx, cancel := context.WithTimeout(
 			context.Background(),
-			5*time.Second,
+			10*time.Second,
 		)
 		defer cancel()
 

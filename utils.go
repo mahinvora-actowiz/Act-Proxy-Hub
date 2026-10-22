@@ -5,13 +5,11 @@ import (
 	"errors"
 	"fmt"
 	"log"
-	"math"
 	"net/url"
 	"strconv"
 	"strings"
 
 	"github.com/valyala/fasthttp"
-	"golang.org/x/crypto/bcrypt"
 )
 
 func getClientIP(ctx *fasthttp.RequestCtx) string {
@@ -140,52 +138,12 @@ func ProcessJSONToEncodedCookies(jsonRaw string) (string, error) {
 	return url.QueryEscape(rawString), nil
 }
 
-func HashPassword(password string) (string, error) {
-
-	bytes, err := bcrypt.GenerateFromPassword(
-		[]byte(password),
-		14,
-	)
-
-	return string(bytes), err
-}
-
-func CheckPassword(
-	hashedPassword string,
-	password string,
-) bool {
-
-	err := bcrypt.CompareHashAndPassword(
-		[]byte(hashedPassword),
-		[]byte(password),
-	)
-
-	return err == nil
-}
-
-func checkAdminKey(ctx *fasthttp.RequestCtx) bool {
-	adminKey := string(ctx.Request.Header.Peek("admin-key"))
-	if adminKey != "8f7c9c6a-4b9d-4f8a-a0b7-91f2d3e4c5b6" {
-		sendJSONResponse(ctx, 401, false, "Unauthorized", nil)
-		return false
-	}
-	return true
-}
-
-func checkUserKey(ctx *fasthttp.RequestCtx) bool {
-	apiKey := string(ctx.Request.Header.Peek("api-key"))
-	if apiKey != "2d1e7f90-8c44-41c9-b6f2-5a8d9e0f7b12" {
-		sendJSONResponse(ctx, 401, false, "Unauthorized", nil)
-		return false
-	}
-	return true
-}
-
 // sendJSONResponse sends a consistent JSON response
-func sendJSONResponse(ctx *fasthttp.RequestCtx, statusCode int, success bool, message string, data interface{}) {
+func sendJSONResponse(ctx *fasthttp.RequestCtx, statusCode int, success bool, message string, data interface{}, errorSource string) {
 	response := map[string]interface{}{
-		"success": success,
-		"message": message,
+		"success":      success,
+		"message":      message,
+		"error_source": errorSource, // NEW: "proxy_hub", "proxy_gateway", or "none"
 	}
 
 	if data != nil {
@@ -196,32 +154,7 @@ func sendJSONResponse(ctx *fasthttp.RequestCtx, statusCode int, success bool, me
 	if err != nil {
 		ctx.SetStatusCode(500)
 		ctx.SetContentType("application/json")
-		ctx.SetBodyString(`{"success":false,"message":"Internal server error"}`)
-		return
-	}
-
-	ctx.SetContentType("application/json")
-	ctx.SetStatusCode(statusCode)
-	ctx.SetBody(jsonData)
-}
-
-// sendPaginatedJSONResponse sends a consistent JSON response with pagination
-func sendPaginatedJSONResponse(ctx *fasthttp.RequestCtx, statusCode int, success bool, message string, data interface{}, page, limit, total int) {
-	response := map[string]interface{}{
-		"success":    success,
-		"message":    message,
-		"data":       data,
-		"page":       page,
-		"limit":      limit,
-		"total":      total,
-		"totalPages": int(math.Ceil(float64(total) / float64(limit))),
-	}
-
-	jsonData, err := json.Marshal(response)
-	if err != nil {
-		ctx.SetStatusCode(500)
-		ctx.SetContentType("application/json")
-		ctx.SetBodyString(`{"success":false,"message":"Internal server error"}`)
+		ctx.SetBodyString(`{"success":false,"message":"Internal server error","error_source":"proxy_hub"}`)
 		return
 	}
 

@@ -19,6 +19,7 @@ type ProxyConfig struct {
 	TokenID               primitive.ObjectID `bson:"tokenId"`
 	TotalEstimatedCredits int                `bson:"totalEstimatedCredits"`
 	UsedCredits           int                `bson:"usedCredits"`
+	Total                 int                `bson:"total"`
 	Status                string             `bson:"status"`
 }
 
@@ -31,7 +32,8 @@ type RequestLog struct {
 	ResponseTime int64              `bson:"responseTime"`
 	CreditUsed   int                `bson:"creditUsed"`
 	CreatedAt    time.Time          `bson:"createdAt"`
-	ErrorMessage string              `bson:"errorMessage"` 
+	ErrorMessage string             `bson:"errorMessage"` 
+	ErrorSource  string             `bson:"errorSource"`
 }
 
 // Scrape.do configuration struct

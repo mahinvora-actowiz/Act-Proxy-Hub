@@ -1,8 +1,10 @@
 package main
 
 import (
+	"fmt"
 	"log"
 	"os"
+	"path/filepath"
 	"sync"
 	"time"
 
@@ -15,7 +17,49 @@ var usageLock sync.Mutex
 
 var ActOneEndpoint string
 
+type dailyWriter struct {
+	mu     sync.Mutex
+	dir    string
+	prefix string
+	day    string
+	file   *os.File
+}
+
+func newDailyWriter(dir, prefix string) *dailyWriter {
+	return &dailyWriter{dir: dir, prefix: prefix}
+}
+
+func (w *dailyWriter) Write(p []byte) (int, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+
+	today := time.Now().Format("2006-01-02") // local time
+
+	if w.file == nil || today != w.day {
+		if w.file != nil {
+			w.file.Close()
+			w.file = nil
+		}
+
+		if err := os.MkdirAll(w.dir, 0755); err != nil {
+			return os.Stderr.Write(p)
+		}
+
+		name := filepath.Join(w.dir, fmt.Sprintf("%s-%s.txt", w.prefix, today))
+		f, err := os.OpenFile(name, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0644)
+		if err != nil {
+			return os.Stderr.Write(p) // fallback so logs aren't lost
+		}
+		w.file = f
+		w.day = today
+	}
+
+	return w.file.Write(p)
+}
+
 func main() {
+	log.SetOutput(newDailyWriter("C:/proxy_server_logs", "logs"))
+	log.Println("Server starting... Daily log files are active!")
 
 	// Load .env file
 	err := godotenv.Load()
@@ -29,11 +73,6 @@ func main() {
 	port := os.Getenv("PORT")
 	mongoURI := os.Getenv("MONGO_URI")
 	dbName := os.Getenv("DB_NAME")
-
-	// Validate required variables
-	if port == "" {
-		port = "8080"
-	}
 
 	if mongoURI == "" {
 		log.Fatal("MONGO_URI is not set")
@@ -52,7 +91,6 @@ func main() {
 
 	server := &fasthttp.Server{
 		Handler: func(ctx *fasthttp.RequestCtx) {
-
 			enableCORS(ctx)
 
 			if string(ctx.Method()) == "OPTIONS" {
@@ -77,12 +115,10 @@ func main() {
 	}
 
 	log.Printf("High Performance Fetch Server Running on :%s", port)
-
 	log.Fatal(server.ListenAndServe("0.0.0.0:" + port))
 }
 
 func enableCORS(ctx *fasthttp.RequestCtx) {
-
 	ctx.Response.Header.Set(
 		"Access-Control-Allow-Origin",
 		"*",

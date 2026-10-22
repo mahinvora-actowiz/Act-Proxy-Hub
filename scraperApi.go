@@ -19,14 +19,16 @@ func fetchHandlerScraperAPI(ctx *fasthttp.RequestCtx, scraperapiKey string, toke
 	// Extract URL early for logging context, even if JSON is invalid
 	var earlyURL string
 	if len(body) > 0 {
-		var tempReq struct { URL string `json:"url"` }
+		var tempReq struct {
+			URL string `json:"url"`
+		}
 		_ = json.Unmarshal(body, &tempReq)
 		earlyURL = tempReq.URL
 	}
 
 	if len(body) == 0 {
-		logRequest(ctx, scraperapiKey, tokenID, "", 400, start, 0, "Request body is empty") 
-		sendJSONResponse(ctx, 400, false, "Request body is empty", nil)
+		logRequest(ctx, scraperapiKey, tokenID, "", 400, start, 0, "Request body is empty", "proxy_hub")
+		sendJSONResponse(ctx, 400, false, "Request body is empty", nil, "proxy_hub")
 		return
 	}
 
@@ -47,8 +49,8 @@ func fetchHandlerScraperAPI(ctx *fasthttp.RequestCtx, scraperapiKey string, toke
 	decoder.UseNumber()
 	if err := decoder.Decode(&req); err != nil {
 		log.Printf("❌ JSON Unmarshal Error: %v | Body: %s", err, string(body))
-		logRequest(ctx, scraperapiKey, tokenID, earlyURL, 400, start, 0, fmt.Sprintf("Invalid JSON format: %v", err)) 
-		sendJSONResponse(ctx, 400, false, fmt.Sprintf("Invalid JSON format: %v", err), nil)
+		logRequest(ctx, scraperapiKey, tokenID, earlyURL, 400, start, 0, fmt.Sprintf("Invalid JSON format: %v", err), "proxy_hub")
+		sendJSONResponse(ctx, 400, false, fmt.Sprintf("Invalid JSON format: %v", err), nil, "proxy_hub")
 		return
 	}
 
@@ -144,14 +146,14 @@ func fetchHandlerScraperAPI(ctx *fasthttp.RequestCtx, scraperapiKey string, toke
 	urlStr := req.URL
 	parsedURL, err := url.Parse(urlStr)
 	if err != nil {
-		logRequest(ctx, scraperapiKey, tokenID, urlStr, 400, start, 0, fmt.Sprintf("Invalid URL format: %v", err)) 
-		sendJSONResponse(ctx, 400, false, "Invalid URL format", nil)
+		logRequest(ctx, scraperapiKey, tokenID, urlStr, 400, start, 0, fmt.Sprintf("Invalid URL format: %v", err), "proxy_hub")
+		sendJSONResponse(ctx, 400, false, "Invalid URL format", nil, "proxy_hub")
 		return
 	}
 
 	if parsedURL.Scheme == "" || parsedURL.Host == "" {
-		logRequest(ctx, scraperapiKey, tokenID, urlStr, 400, start, 0, "Invalid target URL: missing scheme or host")
-		sendJSONResponse(ctx, 400, false, "Invalid target URL: missing scheme or host", nil)
+		logRequest(ctx, scraperapiKey, tokenID, urlStr, 400, start, 0, "Invalid target URL: missing scheme or host", "proxy_hub")
+		sendJSONResponse(ctx, 400, false, "Invalid target URL: missing scheme or host", nil, "proxy_hub")
 		return
 	}
 

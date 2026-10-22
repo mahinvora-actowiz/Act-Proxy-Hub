@@ -18,14 +18,16 @@ func fetchHandlerScrapeDo(ctx *fasthttp.RequestCtx, scrapedoKey string, tokenID 
 
 	var earlyURL string
 	if len(body) > 0 {
-		var tempReq struct { URL string `json:"url"` }
+		var tempReq struct {
+			URL string `json:"url"`
+		}
 		_ = json.Unmarshal(body, &tempReq)
 		earlyURL = tempReq.URL
 	}
 
 	if len(body) == 0 {
-		logRequest(ctx, scrapedoKey, tokenID, "", 400, start, 0, "Request body is empty") // ✅ ADDED
-		sendJSONResponse(ctx, 400, false, "Request body is empty", nil)
+		logRequest(ctx, scrapedoKey, tokenID, "", 400, start, 0, "Request body is empty", "proxy_hub")
+		sendJSONResponse(ctx, 400, false, "Request body is empty", nil, "proxy_hub")
 		return
 	}
 
@@ -43,11 +45,11 @@ func fetchHandlerScrapeDo(ctx *fasthttp.RequestCtx, scrapedoKey string, tokenID 
 
 	var req FetchRequest
 	decoder := json.NewDecoder(bytes.NewReader(body))
-	decoder.UseNumber() 
+	decoder.UseNumber()
 	if err := decoder.Decode(&req); err != nil {
 		log.Printf("❌ JSON Unmarshal Error: %v | Body: %s", err, string(body))
-		logRequest(ctx, scrapedoKey, tokenID, earlyURL, 400, start, 0, fmt.Sprintf("Invalid JSON format: %v", err)) // ✅ ADDED
-		sendJSONResponse(ctx, 400, false, fmt.Sprintf("Invalid JSON format: %v", err), nil)
+		logRequest(ctx, scrapedoKey, tokenID, earlyURL, 400, start, 0, fmt.Sprintf("Invalid JSON format: %v", err), "proxy_hub") // UPDATED
+		sendJSONResponse(ctx, 400, false, fmt.Sprintf("Invalid JSON format: %v", err), nil, "proxy_hub")                         // UPDATED
 		return
 	}
 
@@ -207,14 +209,14 @@ func fetchHandlerScrapeDo(ctx *fasthttp.RequestCtx, scrapedoKey string, tokenID 
 	urlStr := req.URL
 	parsedURL, err := url.Parse(urlStr)
 	if err != nil {
-		logRequest(ctx, scrapedoKey, tokenID, urlStr, 400, start, 0, fmt.Sprintf("Invalid URL format: %v", err)) // ✅ ADDED
-		sendJSONResponse(ctx, 400, false, "Invalid URL format", nil)
+		logRequest(ctx, scrapedoKey, tokenID, urlStr, 400, start, 0, fmt.Sprintf("Invalid URL format: %v", err), "proxy_hub")
+		sendJSONResponse(ctx, 400, false, "Invalid URL format", nil, "proxy_hub")
 		return
 	}
 
 	if parsedURL.Scheme == "" || parsedURL.Host == "" {
-		logRequest(ctx, scrapedoKey, tokenID, urlStr, 400, start, 0, "Invalid target URL: missing scheme or host") // ✅ ADDED
-		sendJSONResponse(ctx, 400, false, "Invalid target URL: missing scheme or host", nil)
+		logRequest(ctx, scrapedoKey, tokenID, urlStr, 400, start, 0, "Invalid target URL: missing scheme or host", "proxy_hub")
+		sendJSONResponse(ctx, 400, false, "Invalid target URL: missing scheme or host", nil, "proxy_hub")
 		return
 	}
 
@@ -270,8 +272,8 @@ func fetchHandlerScrapeDo(ctx *fasthttp.RequestCtx, scrapedoKey string, tokenID 
 			encodedCookies, err := ProcessJSONToEncodedCookies(rawCookies)
 			if err != nil {
 				log.Printf("❌ Cookie validation failed: %v", err)
-				logRequest(ctx, scrapedoKey, tokenID, urlStr, 400, start, 0, fmt.Sprintf("Invalid setCookies: %v", err)) // ✅ ADDED
-				sendJSONResponse(ctx, 400, false, fmt.Sprintf("Invalid setCookies: %v", err), nil)
+				logRequest(ctx, scrapedoKey, tokenID, urlStr, 400, start, 0, fmt.Sprintf("Invalid setCookies: %v", err), "proxy_hub")
+				sendJSONResponse(ctx, 400, false, fmt.Sprintf("Invalid setCookies: %v", err), nil, "proxy_hub")
 				return
 			}
 			apiParams.Set("setCookies", encodedCookies)
@@ -320,8 +322,8 @@ func fetchHandlerScrapeDo(ctx *fasthttp.RequestCtx, scrapedoKey string, tokenID 
 		encodedCookies, err := ProcessJSONToEncodedCookies(rawCookies)
 		if err != nil {
 			log.Printf("❌ Cookie validation failed: %v", err)
-			logRequest(ctx, scrapedoKey, tokenID, urlStr, 400, start, 0, fmt.Sprintf("Invalid setCookies: %v", err)) // ✅ ADDED
-			sendJSONResponse(ctx, 400, false, fmt.Sprintf("Invalid setCookies: %v", err), nil)
+			logRequest(ctx, scrapedoKey, tokenID, urlStr, 400, start, 0, fmt.Sprintf("Invalid setCookies: %v", err), "proxy_hub")
+			sendJSONResponse(ctx, 400, false, fmt.Sprintf("Invalid setCookies: %v", err), nil, "proxy_hub")
 			return
 		}
 		params.Set("setCookies", encodedCookies)
@@ -353,5 +355,5 @@ func fetchHandlerScrapeDo(ctx *fasthttp.RequestCtx, scrapedoKey string, tokenID 
 	proxyPass := params.Encode()
 	proxyAddr := fmt.Sprintf("http://%s:%s@proxy.scrape.do:8080", cfg.Token, proxyPass)
 
-	executeRequest(ctx, scrapedoKey, tokenID, proxyAddr, urlStr ,req.URL ,method, payloadStr, customHeaders, totalEstimatedCredits, start, "scrapedo")
+	executeRequest(ctx, scrapedoKey, tokenID, proxyAddr, urlStr, req.URL, method, payloadStr, customHeaders, totalEstimatedCredits, start, "scrapedo")
 }

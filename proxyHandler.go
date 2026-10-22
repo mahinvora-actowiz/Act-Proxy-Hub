@@ -40,29 +40,29 @@ func secureFetchHandler(ctx *fasthttp.RequestCtx) {
 
 	if providedKey == "" {
 		errMsg := "Missing required header: api-key"
-		logRequest(ctx, "key missing", tokenID, urlStr, 401, start, 0, errMsg)
-		sendJSONResponse(ctx, 401, false, errMsg, nil)
+		logRequest(ctx, "key missing", tokenID, urlStr, 401, start, 0, errMsg, "proxy_hub")
+		sendJSONResponse(ctx, 401, false, errMsg, nil, "proxy_hub")
 		return
 	}
 
 	if urlStr == "" {
 		errMsg := "Missing required field: url in request body"
-		logRequest(ctx, providedKey, tokenID, "", 400, start, 0, errMsg)
-		sendJSONResponse(ctx, 400, false, errMsg, nil)
+		logRequest(ctx, providedKey, tokenID, "", 400, start, 0, errMsg, "proxy_hub")
+		sendJSONResponse(ctx, 400, false, errMsg, nil, "proxy_hub")
 		return
 	}
 
 	parsedURL, err := url.Parse(urlStr)
 	if err != nil || parsedURL.Scheme == "" || parsedURL.Host == "" {
 		errMsg := fmt.Sprintf("Invalid target URL format: %s", urlStr)
-		logRequest(ctx, providedKey, tokenID, urlStr, 400, start, 0, errMsg)
-		sendJSONResponse(ctx, 400, false, "Invalid target URL format", nil)
+		logRequest(ctx, providedKey, tokenID, urlStr, 400, start, 0, errMsg, "proxy_hub")
+		sendJSONResponse(ctx, 400, false, "Invalid target URL format", nil, "proxy_hub")
 		return
 	}
 
 	select {
 	case <-ctx.Done():
-		logRequest(ctx, providedKey, tokenID, urlStr, 499, start, 0, "Client closed request")
+		logRequest(ctx, providedKey, tokenID, urlStr, 499, start, 0, "Client closed request", "proxy_hub")
 		return
 	default:
 	}
@@ -75,13 +75,13 @@ func secureFetchHandler(ctx *fasthttp.RequestCtx) {
 	case quotaSemaphore <- struct{}{}:
 		defer func() { <-quotaSemaphore }()
 	case <-ctx.Done():
-		logRequest(ctx, providedKey, tokenID, urlStr, 499, start, 0, "Client closed request during semaphore wait")
+		logRequest(ctx, providedKey, tokenID, urlStr, 499, start, 0, "Client closed request", "proxy_hub")
 		cancel()
 		return
 	case <-c.Done():
 		errMsg := "Server busy, please try again"
-		logRequest(ctx, providedKey, tokenID, urlStr, 429, start, 0, errMsg)
-		sendJSONResponse(ctx, 429, false, errMsg, nil)
+		logRequest(ctx, providedKey, tokenID, urlStr, 429, start, 0, errMsg, "proxy_hub")
+		sendJSONResponse(ctx, 429, false, errMsg, nil, "proxy_hub")
 		return
 	}
 
@@ -101,6 +101,7 @@ func secureFetchHandler(ctx *fasthttp.RequestCtx) {
 			"proxyName":             1,
 			"totalEstimatedCredits": 1,
 			"usedCredits":           1,
+			"total":                 1,
 			"status":                1,
 			"token":                 "$tokenInfo.token",
 			"tokenId":               1,
@@ -110,23 +111,23 @@ func secureFetchHandler(ctx *fasthttp.RequestCtx) {
 	cursor, err := collection.Aggregate(c, pipeline)
 	if err != nil {
 		log.Printf("❌ Aggregation failed: %v", err)
-		logRequest(ctx, providedKey, tokenID, urlStr, 500, start, 0, err.Error())
-		sendJSONResponse(ctx, 500, false, "Internal server error", nil)
+		logRequest(ctx, providedKey, tokenID, urlStr, 500, start, 0, err.Error(), "proxy_hub")
+		sendJSONResponse(ctx, 500, false, "Internal server error", nil, "proxy_hub")
 		return
 	}
 
 	var results []ProxyConfig
 	if err := cursor.All(c, &results); err != nil {
 		log.Printf("❌ Decode failed: %v", err)
-		logRequest(ctx, providedKey, tokenID, urlStr, 500, start, 0, err.Error())
-		sendJSONResponse(ctx, 500, false, "Internal server error", nil)
+		logRequest(ctx, providedKey, tokenID, urlStr, 500, start, 0, err.Error(), "proxy_hub")
+		sendJSONResponse(ctx, 500, false, "Internal server error", nil, "proxy_hub")
 		return
 	}
 
 	if len(results) == 0 {
 		errMsg := "Invalid API key"
-		logRequest(ctx, providedKey, tokenID, urlStr, 401, start, 0, errMsg)
-		sendJSONResponse(ctx, 401, false, errMsg, nil)
+		logRequest(ctx, providedKey, tokenID, urlStr, 401, start, 0, errMsg, "proxy_hub")
+		sendJSONResponse(ctx, 401, false, errMsg, nil, "proxy_hub")
 		return
 	}
 
@@ -137,37 +138,37 @@ func secureFetchHandler(ctx *fasthttp.RequestCtx) {
 	if aliasDoc.Token == "" {
 		errMsg := "Proxy not configured. Contact support."
 		log.Printf("⚠️ No proxy token configured for api-key=%s", providedKey)
-		logRequest(ctx, providedKey, tokenID, urlStr, 500, start, 0, errMsg)
-		sendJSONResponse(ctx, 500, false, errMsg, nil)
+		logRequest(ctx, providedKey, tokenID, urlStr, 500, start, 0, errMsg, "proxy_hub")
+		sendJSONResponse(ctx, 500, false, errMsg, nil, "proxy_hub")
 		return
 	}
 
 	// Pre-request quota check
-	remaining := aliasDoc.TotalEstimatedCredits - aliasDoc.UsedCredits
+	remaining := aliasDoc.TotalEstimatedCredits - aliasDoc.Total
 	if remaining <= 0 {
 		collection.UpdateOne(context.Background(),
 			bson.M{"apiKey": providedKey},
 			bson.M{"$inc": bson.M{"quotaExceeded": 1, "total": 1}})
 		log.Printf("🚫 Quota exceeded BEFORE request | key=%s", providedKey)
-		logRequest(ctx, providedKey, tokenID, urlStr, 429, start, 0, "Quota exceeded before request")
+		logRequest(ctx, providedKey, tokenID, urlStr, 429, start, 0, "Quota exceeded before request", "proxy_hub")
 		sendJSONResponse(ctx, 429, false, "Quota exceeded", map[string]interface{}{
-			"usedCredits": aliasDoc.UsedCredits, "limit": aliasDoc.TotalEstimatedCredits, "remaining": 0,
-		})
+			"total requests": aliasDoc.Total, "limit": aliasDoc.TotalEstimatedCredits, "remaining": 0,
+		}, "proxy_hub")
 		return
 	}
 
 	if aliasDoc.Status != "active" {
 		errMsg := fmt.Sprintf("key is inactive (status: %s)", aliasDoc.Status)
-		logRequest(ctx, providedKey, tokenID, urlStr, 403, start, 0, errMsg)
+		logRequest(ctx, providedKey, tokenID, urlStr, 403, start, 0, errMsg, "proxy_hub")
 		sendJSONResponse(ctx, 403, false, "key is inactive", map[string]interface{}{
 			"status": aliasDoc.Status,
-		})
+		}, "proxy_hub")
 		return
 	}
 
 	select {
 	case <-ctx.Done():
-		logRequest(ctx, providedKey, tokenID, urlStr, 499, start, 0, "Client closed request before proxy dispatch")
+		logRequest(ctx, providedKey, tokenID, urlStr, 499, start, 0, "Client closed request", "proxy_hub")
 		return
 	default:
 	}
@@ -175,8 +176,8 @@ func secureFetchHandler(ctx *fasthttp.RequestCtx) {
 	parsedCfg, err := parseProxyConfig("scrapedo", proxyParamsStr)
 	if err != nil {
 		log.Printf("❌ Config parse error: %v", err)
-		logRequest(ctx, providedKey, tokenID, urlStr, 400, start, 0, err.Error())
-		sendJSONResponse(ctx, 400, false, err.Error(), nil)
+		logRequest(ctx, providedKey, tokenID, urlStr, 400, start, 0, err.Error(), "proxy_hub")
+		sendJSONResponse(ctx, 400, false, err.Error(), nil, "proxy_hub")
 		return
 	}
 
@@ -192,11 +193,11 @@ func secureFetchHandler(ctx *fasthttp.RequestCtx) {
 		apiCfg := convertScrapeDoToScraperAPI(sdCfg)
 		fetchHandlerScraperAPI(ctx, providedKey, aliasDoc.TokenID, aliasDoc.Token, aliasDoc.TotalEstimatedCredits, apiCfg, start)
 	case "actone", "act-one", "actoneproxy":
-		fetchHandlerActOne(ctx, providedKey, aliasDoc.TokenID, aliasDoc.Token, aliasDoc.TotalEstimatedCredits, start)
+		fetchHandlerActOne(ctx, providedKey, aliasDoc.TokenID, aliasDoc.TotalEstimatedCredits, start)
 	default:
 		errMsg := fmt.Sprintf("Server misconfiguration: unknown proxy type (%s)", aliasDoc.ProxyName)
 		log.Printf("❌ Unknown proxyName in DB: %s", aliasDoc.ProxyName)
-		logRequest(ctx, providedKey, tokenID, urlStr, 500, start, 0, errMsg)
-		sendJSONResponse(ctx, 500, false, errMsg, nil)
+		logRequest(ctx, providedKey, tokenID, urlStr, 500, start, 0, errMsg, "proxy_hub")
+		sendJSONResponse(ctx, 500, false, errMsg, nil, "proxy_hub")
 	}
 }
