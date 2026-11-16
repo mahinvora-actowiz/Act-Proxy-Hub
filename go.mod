@@ -8,7 +8,6 @@ require (
 )
 
 require (
-	github.com/DeRuina/timberjack v1.4.8
 	go.mongodb.org/mongo-driver v1.17.9
 )
 

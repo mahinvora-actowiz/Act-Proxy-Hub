@@ -350,7 +350,8 @@ func executeRequest(ctx *fasthttp.RequestCtx, apiKey string, tokenID primitive.O
 
 	filter := bson.M{
 		"apiKey": apiKey,
-		"total":  bson.M{"$lt": totalEstimatedCredits}, 
+		"total": bson.M{"$lt": totalEstimatedCredits},
+		"usedCredits": bson.M{"$lt": totalEstimatedCredits},
 	}
 
 	updateQuery := bson.M{

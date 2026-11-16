@@ -144,15 +144,28 @@ func secureFetchHandler(ctx *fasthttp.RequestCtx) {
 	}
 
 	// Pre-request quota check
-	remaining := aliasDoc.TotalEstimatedCredits - aliasDoc.Total
-	if remaining <= 0 {
+	remainingRequests := aliasDoc.TotalEstimatedCredits - aliasDoc.Total
+	remainingCredits := aliasDoc.TotalEstimatedCredits - aliasDoc.UsedCredits
+
+	// Condition 1: Request count exceeded
+	// Condition 2: Credits consumed exceeded
+	if remainingRequests <= 0 || remainingCredits <= 0 {
 		collection.UpdateOne(context.Background(),
 			bson.M{"apiKey": providedKey},
 			bson.M{"$inc": bson.M{"quotaExceeded": 1, "total": 1}})
-		log.Printf("🚫 Quota exceeded BEFORE request | key=%s", providedKey)
-		logRequest(ctx, providedKey, tokenID, urlStr, 429, start, 0, "Quota exceeded before request", "proxy_hub")
+		
+		log.Printf("🚫 Quota exceeded BEFORE request | key=%s | remainingRequests=%d | remainingCredits=%d", 
+			providedKey, remainingRequests, remainingCredits)
+		
+		logRequest(ctx, providedKey, tokenID, urlStr, 429, start, 0, 
+			"Quota exceeded before request", "proxy_hub")
+
 		sendJSONResponse(ctx, 429, false, "Quota exceeded", map[string]interface{}{
-			"total requests": aliasDoc.Total, "limit": aliasDoc.TotalEstimatedCredits, "remaining": 0,
+			"total_requests":    aliasDoc.Total,
+			"used_credits":      aliasDoc.UsedCredits,
+			"limit":             aliasDoc.TotalEstimatedCredits,
+			"remaining_requests": remainingRequests,
+			"remaining_credits": remainingCredits,
 		}, "proxy_hub")
 		return
 	}
