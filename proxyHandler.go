@@ -134,6 +134,16 @@ func secureFetchHandler(ctx *fasthttp.RequestCtx) {
 	aliasDoc = results[0]
 	tokenID = aliasDoc.TokenID
 	dbProxyName := strings.ToLower(aliasDoc.ProxyName)
+	proxyProvider := ""
+	switch dbProxyName {
+	case "scrapedo", "scrape.do", "scrape-do", "scrapedoproxy":
+		proxyProvider = "scrapedo"
+	case "scraperapi", "scraper_api", "scraper-api", "scraperapiproxy", "scraper api":
+		proxyProvider = "scraperapi"
+	case "actone", "act-one", "actoneproxy":
+		proxyProvider = "actone"
+	}
+	ctx.SetUserValue("proxyProvider", proxyProvider)
 
 	if aliasDoc.Token == "" {
 		errMsg := "Proxy not configured. Contact support."
@@ -153,19 +163,19 @@ func secureFetchHandler(ctx *fasthttp.RequestCtx) {
 		collection.UpdateOne(context.Background(),
 			bson.M{"apiKey": providedKey},
 			bson.M{"$inc": bson.M{"quotaExceeded": 1, "total": 1}})
-		
-		log.Printf("🚫 Quota exceeded BEFORE request | key=%s | remainingRequests=%d | remainingCredits=%d", 
+
+		log.Printf("🚫 Quota exceeded BEFORE request | key=%s | remainingRequests=%d | remainingCredits=%d",
 			providedKey, remainingRequests, remainingCredits)
-		
-		logRequest(ctx, providedKey, tokenID, urlStr, 429, start, 0, 
+
+		logRequest(ctx, providedKey, tokenID, urlStr, 429, start, 0,
 			"Quota exceeded before request", "proxy_hub")
 
 		sendJSONResponse(ctx, 429, false, "Quota exceeded", map[string]interface{}{
-			"total_requests":    aliasDoc.Total,
-			"used_credits":      aliasDoc.UsedCredits,
-			"limit":             aliasDoc.TotalEstimatedCredits,
+			"total_requests":     aliasDoc.Total,
+			"used_credits":       aliasDoc.UsedCredits,
+			"limit":              aliasDoc.TotalEstimatedCredits,
 			"remaining_requests": remainingRequests,
-			"remaining_credits": remainingCredits,
+			"remaining_credits":  remainingCredits,
 		}, "proxy_hub")
 		return
 	}

@@ -110,6 +110,7 @@ func executeRequest(ctx *fasthttp.RequestCtx, apiKey string, tokenID primitive.O
 	var finalActualCost int
 	var finalErrorMessage string
 	var errorSource string = "none"
+	ctx.SetUserValue("proxyProvider", provider)
 
 	// Defer ensures we log the request exactly once, regardless of how the function exits
 	defer func() {
@@ -256,7 +257,7 @@ func executeRequest(ctx *fasthttp.RequestCtx, apiKey string, tokenID primitive.O
 	isProxyFailure := resp != nil && (statusCode == 502 || statusCode == 503 || statusCode == 504)
 
 	if isNetworkError || isProxyFailure {
-		errorSource = "proxy_gateway"
+		errorSource = provider
 
 		log.Printf("❌ Request failed | provider=%s | url=%s | err=%v | status=%d",
 			provider, targetURL, err, statusCode)
@@ -271,7 +272,7 @@ func executeRequest(ctx *fasthttp.RequestCtx, apiKey string, tokenID primitive.O
 		collection.UpdateOne(context.Background(),
 			bson.M{"apiKey": apiKey},
 			updateQuery)
-		
+
 		if isNetworkError {
 			// Capture exact upstream body if available, even on network errors
 			if resp != nil && len(resp.Body()) > 0 {
@@ -302,10 +303,10 @@ func executeRequest(ctx *fasthttp.RequestCtx, apiKey string, tokenID primitive.O
 		if err != nil {
 			if errors.Is(err, fasthttp.ErrTimeout) {
 				finalStatusCode = 504
-				sendJSONResponse(ctx, 504, false, "Upstream timeout", nil, "proxy_gateway")
+				sendJSONResponse(ctx, 504, false, "Upstream timeout", nil, provider)
 			} else {
 				finalStatusCode = 502
-				sendJSONResponse(ctx, 502, false, "Bad gateway", nil, "proxy_gateway")
+				sendJSONResponse(ctx, 502, false, "Bad gateway", nil, provider)
 			}
 			return
 		}
@@ -314,7 +315,7 @@ func executeRequest(ctx *fasthttp.RequestCtx, apiKey string, tokenID primitive.O
 		sendJSONResponse(ctx, statusCode, false, "Proxy error", map[string]interface{}{
 			"upstreamStatus": statusCode,
 			"body":           resp.Body(),
-		}, "proxy_gateway")
+		}, provider)
 		return
 	}
 
@@ -335,7 +336,7 @@ func executeRequest(ctx *fasthttp.RequestCtx, apiKey string, tokenID primitive.O
 		}
 	} else {
 		updateInc["fail"] = 1
-		errorSource = "proxy_gateway"
+		errorSource = provider
 		// Always capture exact upstream error body for 4xx/5xx to prevent blank messages
 		upstreamBody := ""
 		if resp != nil {
@@ -349,13 +350,13 @@ func executeRequest(ctx *fasthttp.RequestCtx, apiKey string, tokenID primitive.O
 	}
 
 	filter := bson.M{
-		"apiKey": apiKey,
-		"total": bson.M{"$lt": totalEstimatedCredits},
+		"apiKey":      apiKey,
+		"total":       bson.M{"$lt": totalEstimatedCredits},
 		"usedCredits": bson.M{"$lt": totalEstimatedCredits},
 	}
 
 	updateQuery := bson.M{
-		"$inc": updateInc, 
+		"$inc": updateInc,
 		"$set": bson.M{"updatedAt": time.Now()},
 	}
 
@@ -376,7 +377,7 @@ func executeRequest(ctx *fasthttp.RequestCtx, apiKey string, tokenID primitive.O
 
 	if res != nil && res.ModifiedCount == 0 {
 		log.Printf("🚫 Quota exceeded | key=%s | provider=%s | cost=%d", apiKey, provider, actualCost)
-		
+
 		// Optional: Record the overage attempt in the DB
 		collection.UpdateOne(context.Background(),
 			bson.M{"apiKey": apiKey},
@@ -385,17 +386,17 @@ func executeRequest(ctx *fasthttp.RequestCtx, apiKey string, tokenID primitive.O
 		finalStatusCode = 429
 		finalErrorMessage = "Quota exceeded"
 		errorSource = "proxy_hub"
-		
+
 		sendJSONResponse(ctx, 429, false, "Quota exceeded", nil, "proxy_hub")
 		return
 	}
 
 	if statusCode >= 400 {
 		finalStatusCode = statusCode
-		
-		// Always label upstream errors as proxy_gateway
-		errorSource = "proxy_gateway" 
-		
+
+		// Label upstream errors with the provider that returned them.
+		errorSource = provider
+
 		upstreamBody := ""
 		if resp != nil {
 			upstreamBody = strings.TrimSpace(string(resp.Body()))
@@ -404,7 +405,7 @@ func executeRequest(ctx *fasthttp.RequestCtx, apiKey string, tokenID primitive.O
 		var enrichedData interface{}
 		if upstreamBody != "" {
 			var upstreamJSON map[string]interface{}
-			
+
 			// 1. Try to parse the upstream response as JSON
 			if err := json.Unmarshal([]byte(upstreamBody), &upstreamJSON); err == nil {
 				// 2. If successful, safely inject our error_source field
@@ -437,7 +438,7 @@ func executeRequest(ctx *fasthttp.RequestCtx, apiKey string, tokenID primitive.O
 		provider, statusCode, time.Since(start), actualCost)
 
 	finalStatusCode = statusCode
-	errorSource = "proxy_gateway" // Indicate response successfully came through proxy gateway
+	errorSource = provider
 
 	upstreamBody := string(resp.Body())
 
@@ -459,7 +460,7 @@ func executeRequest(ctx *fasthttp.RequestCtx, apiKey string, tokenID primitive.O
 	}
 
 	// Send the unified success response
-		resp.Header.VisitAll(func(k, v []byte) {
+	resp.Header.VisitAll(func(k, v []byte) {
 		ctx.Response.Header.SetBytesKV(k, v)
 	})
 	ctx.SetStatusCode(statusCode)

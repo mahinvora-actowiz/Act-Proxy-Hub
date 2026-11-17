@@ -143,7 +143,7 @@ func sendJSONResponse(ctx *fasthttp.RequestCtx, statusCode int, success bool, me
 	response := map[string]interface{}{
 		"success":      success,
 		"message":      message,
-		"error_source": errorSource, // NEW: "proxy_hub", "proxy_gateway", or "none"
+		"error_source": errorSource, // "proxy_hub", a provider name, or "none"
 	}
 
 	if data != nil {

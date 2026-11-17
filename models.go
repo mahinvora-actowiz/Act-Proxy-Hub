@@ -24,16 +24,17 @@ type ProxyConfig struct {
 }
 
 type RequestLog struct {
-	Key          string             `bson:"key"`
-	TokenID      primitive.ObjectID `bson:"tokenId"`
-	Domain       string             `bson:"domain"`
-	IP           string             `bson:"ip"`
-	StatusCode   int                `bson:"statusCode"`
-	ResponseTime int64              `bson:"responseTime"`
-	CreditUsed   int                `bson:"creditUsed"`
-	CreatedAt    time.Time          `bson:"createdAt"`
-	ErrorMessage string             `bson:"errorMessage"` 
-	ErrorSource  string             `bson:"errorSource"`
+	Key           string             `bson:"key"`
+	ProxyProvider string             `bson:"proxyProvider"`
+	TokenID       primitive.ObjectID `bson:"tokenId"`
+	Domain        string             `bson:"domain"`
+	IP            string             `bson:"ip"`
+	StatusCode    int                `bson:"statusCode"`
+	ResponseTime  int64              `bson:"responseTime"`
+	CreditUsed    int                `bson:"creditUsed"`
+	CreatedAt     time.Time          `bson:"createdAt"`
+	ErrorMessage  string             `bson:"errorMessage"`
+	ErrorSource   string             `bson:"errorSource"`
 }
 
 // Scrape.do configuration struct

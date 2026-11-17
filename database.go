@@ -76,18 +76,20 @@ func logRequest(
 
 	// Use getActualTime() for consistency with your systemTimeOffset logic
 	currentTime := time.Now()
+	proxyProvider, _ := ctx.UserValue("proxyProvider").(string)
 
 	logDoc := RequestLog{
-		Key:          apiKey,
-		TokenID:      tokenID,
-		Domain:       domain,
-		IP:           ctx.RemoteIP().String(),
-		StatusCode:   statusCode,
-		ResponseTime: time.Since(start).Milliseconds(),
-		CreditUsed:   actualCost,
-		CreatedAt:    currentTime, 
-		ErrorMessage: errorMessage,
-		ErrorSource:  errorSource,
+		Key:           apiKey,
+		ProxyProvider: proxyProvider,
+		TokenID:       tokenID,
+		Domain:        domain,
+		IP:            ctx.RemoteIP().String(),
+		StatusCode:    statusCode,
+		ResponseTime:  time.Since(start).Milliseconds(),
+		CreditUsed:    actualCost,
+		CreatedAt:     currentTime,
+		ErrorMessage:  errorMessage,
+		ErrorSource:   errorSource,
 	}
 
 	go func() {
