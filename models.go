@@ -30,6 +30,7 @@ type RequestLog struct {
 	Domain        string             `bson:"domain"`
 	IP            string             `bson:"ip"`
 	StatusCode    int                `bson:"statusCode"`
+	IsError       bool               `bson:"isError"`
 	ResponseTime  int64              `bson:"responseTime"`
 	CreditUsed    int                `bson:"creditUsed"`
 	CreatedAt     time.Time          `bson:"createdAt"`

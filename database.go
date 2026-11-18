@@ -85,6 +85,7 @@ func logRequest(
 		Domain:        domain,
 		IP:            ctx.RemoteIP().String(),
 		StatusCode:    statusCode,
+		IsError:       statusCode != 200,
 		ResponseTime:  time.Since(start).Milliseconds(),
 		CreditUsed:    actualCost,
 		CreatedAt:     currentTime,
